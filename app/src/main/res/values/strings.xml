@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">IPTV 播放器</string>
+
+    <string name="import_playlist">导入播放列表</string>
+    <string name="import_title">导入 IPTV 地址</string>
+    <string name="import_from_url">从 URL 导入 M3U</string>
+    <string name="import_from_file">从本地文件导入</string>
+    <string name="import_single_stream">添加单路直播流</string>
+    <string name="import_from_paste">粘贴 M3U 内容</string>
+    <string name="m3u_url_hint">https://example.com/playlist.m3u</string>
+    <string name="import_url_btn">下载并导入</string>
+    <string name="pick_m3u_file">选择 .m3u / .m3u8 文件</string>
+    <string name="stream_name_hint">频道名称（可选）</string>
+    <string name="stream_url_hint">http(s)://… 或 .m3u8 流地址</string>
+    <string name="add_stream_btn">添加直播流</string>
+    <string name="paste_hint">粘贴 #EXTM3U 内容…</string>
+    <string name="import_paste_btn">解析并导入</string>
+
+    <string name="search_hint">搜索频道 / 分组</string>
+    <string name="group_label">当前分类</string>
+    <string name="group_search_hint">搜索分类名称</string>
+    <string name="group_picker_title">选择分类</string>
+    <string name="group_count_label">%1$d 类</string>
+    <string name="group_channel_count">%1$d 个频道</string>
+    <string name="import_short">导入</string>
+    <string name="channel_count">显示 %1$d / 共 %2$d 个频道</string>
+    <string name="empty_title">还没有频道</string>
+    <string name="empty_subtitle">导入 M3U 播放列表 URL、本地文件，\n或直接添加一条直播流地址开始观看</string>
+
+    <string name="import_success">成功导入 %1$d 个频道</string>
+    <string name="stream_added">已添加直播流</string>
+    <string name="error_empty_url">请输入地址</string>
+    <string name="error_empty_paste">请粘贴 M3U 内容</string>
+    <string name="error_title">导入失败</string>
+    <string name="ok">确定</string>
+    <string name="cancel">取消</string>
+
+    <string name="sources_title">已导入来源</string>
+    <string name="no_sources">暂无导入记录</string>
+    <string name="clear">清空频道</string>
+    <string name="clear_title">清空全部频道？</string>
+    <string name="clear_message">将删除本地保存的所有频道和导入记录，此操作不可撤销。</string>
+    <string name="cleared">已清空</string>
+
+    <string name="prev_channel">上一个</string>
+    <string name="next_channel">下一个</string>
+    <string name="fullscreen">全屏</string>
+    <string name="retry">重试</string>
+    <string name="playback_error">播放失败，请检查网络或流地址</string>
+    <string name="invalid_url">无效的播放地址</string>
+    <string name="no_more_channel">没有更多频道</string>
+    <string name="channel_position">%1$d / %2$d</string>
+</resources>

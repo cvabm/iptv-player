@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- MD3 seed-based palette (Blue) -->
+    <color name="md_theme_primary">#FF1656C7</color>
+    <color name="md_theme_on_primary">#FFFFFFFF</color>
+    <color name="md_theme_primary_container">#FFD8E2FF</color>
+    <color name="md_theme_on_primary_container">#FF001A41</color>
+
+    <color name="md_theme_secondary">#FF555F71</color>
+    <color name="md_theme_on_secondary">#FFFFFFFF</color>
+    <color name="md_theme_secondary_container">#FFD9E3F8</color>
+    <color name="md_theme_on_secondary_container">#FF121C2B</color>
+
+    <color name="md_theme_tertiary">#FF6F5675</color>
+    <color name="md_theme_on_tertiary">#FFFFFFFF</color>
+    <color name="md_theme_tertiary_container">#FFF9D8FE</color>
+    <color name="md_theme_on_tertiary_container">#FF28132F</color>
+
+    <color name="md_theme_error">#FFBA1A1A</color>
+    <color name="md_theme_on_error">#FFFFFFFF</color>
+    <color name="md_theme_error_container">#FFFFDAD6</color>
+    <color name="md_theme_on_error_container">#FF410002</color>
+
+    <color name="md_theme_background">#FFF9F9FF</color>
+    <color name="md_theme_on_background">#FF191C20</color>
+    <color name="md_theme_surface">#FFF9F9FF</color>
+    <color name="md_theme_on_surface">#FF191C20</color>
+    <color name="md_theme_surface_variant">#FFE1E2EC</color>
+    <color name="md_theme_on_surface_variant">#FF44474F</color>
+    <color name="md_theme_outline">#FF74777F</color>
+    <color name="md_theme_outline_variant">#FFC4C6D0</color>
+    <color name="md_theme_surface_container_lowest">#FFFFFFFF</color>
+    <color name="md_theme_surface_container_low">#FFF3F3FA</color>
+    <color name="md_theme_surface_container">#FFEDEDF4</color>
+    <color name="md_theme_surface_container_high">#FFE7E8EE</color>
+    <color name="md_theme_inverse_surface">#FF2E3036</color>
+    <color name="md_theme_inverse_on_surface">#FFF0F0F7</color>
+    <color name="md_theme_inverse_primary">#FFADC6FF</color>
+    <color name="md_theme_scrim">#FF000000</color>
+
+    <!-- Player dark surface -->
+    <color name="player_surface">#FF141218</color>
+    <color name="player_on_surface">#FFE6E1E5</color>
+    <color name="player_on_surface_variant">#FFCAC4D0</color>
+
+    <!-- Launcher (fallback solid if adaptive layers fail) -->
+    <color name="ic_launcher_bg">#FF0B1426</color>
+</resources>
