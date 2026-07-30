@@ -3,6 +3,8 @@ package com.example.iptvplayer
 import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.view.WindowManager
 import android.widget.Toast
@@ -18,10 +20,13 @@ import com.example.iptvplayer.databinding.ActivityPlayerBinding
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Playback via LibVLC so IPTV streams with MPEG Audio Layer 2 (MP2) have sound.
- * Default Android MediaCodec / ExoPlayer cannot decode MP2 (shows "no audio").
+ * LibVLC playback. stop()/release() can block for seconds on stuck IPTV sources
+ * (e.g. slow HLS) — never run those on the main thread or back/finish freezes.
  */
 class PlayerActivity : AppCompatActivity() {
 
@@ -33,6 +38,15 @@ class PlayerActivity : AppCompatActivity() {
     private var urls: List<String> = emptyList()
     private var index: Int = 0
     private var isFullscreen = false
+
+    /** Serializes all blocking VLC native calls off the UI thread. */
+    private val vlcExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "vlc-io").apply { isDaemon = true }
+    }
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val playGeneration = AtomicInteger(0)
+    private var bufferingWatchdog: Runnable? = null
+    private var releaseSubmitted = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,13 +70,13 @@ class PlayerActivity : AppCompatActivity() {
                 if (isFullscreen) {
                     toggleFullscreen()
                 } else {
-                    isEnabled = false
-                    onBackPressedDispatcher.onBackPressed()
+                    // Tear down VLC off-main first so finish() never stalls on stop()
+                    leavePlayer()
                 }
             }
         })
 
-        binding.toolbar.setNavigationOnClickListener { finish() }
+        binding.toolbar.setNavigationOnClickListener { leavePlayer() }
         binding.btnPrev.setOnClickListener { switchChannel(-1) }
         binding.btnNext.setOnClickListener { switchChannel(1) }
         binding.btnFullscreen.setOnClickListener { toggleFullscreen() }
@@ -73,16 +87,30 @@ class PlayerActivity : AppCompatActivity() {
         playCurrent()
     }
 
+    /**
+     * Cancel playback work, free native player without blocking UI, then finish.
+     */
+    private fun leavePlayer() {
+        cancelBufferingWatchdog()
+        playGeneration.incrementAndGet() // invalidate in-flight play
+        releasePlayerAsync()
+        if (!isFinishing) {
+            finish()
+        }
+    }
+
     private fun initPlayer() {
         val options = arrayListOf(
             "--aout=opensles",
             "--audio-time-stretch",
-            "--network-caching=1500",
-            "--live-caching=1500",
+            // Shorter cache: snappier start / abandon on dead streams
+            "--network-caching=1000",
+            "--live-caching=1000",
+            "--file-caching=1000",
             "--http-reconnect",
-            "--no-drop-late-frames",
-            "--no-skip-frames",
-            // Prefer software audio so MP2 always works even if HW audio path fails
+            "--clock-jitter=0",
+            "--clock-synchro=0",
+            // Avoid long stalls on some HW decode paths with live TS
             "--no-omxil-dr"
         )
         libVlc = LibVLC(this, options)
@@ -90,27 +118,67 @@ class PlayerActivity : AppCompatActivity() {
             mp.attachViews(binding.vlcLayout, null, false, false)
             mp.volume = 100
             mp.setEventListener { event ->
-                when (event.type) {
-                    MediaPlayer.Event.Buffering -> {
-                        val pct = event.buffering
-                        binding.progress.visibility =
-                            if (pct in 0f..99.5f) View.VISIBLE else View.GONE
-                    }
-                    MediaPlayer.Event.Playing -> {
-                        binding.progress.visibility = View.GONE
-                        binding.errorPanel.visibility = View.GONE
-                    }
-                    MediaPlayer.Event.EncounteredError -> {
-                        binding.progress.visibility = View.GONE
-                        binding.errorPanel.visibility = View.VISIBLE
-                        binding.tvError.text = getString(R.string.playback_error)
-                    }
-                    MediaPlayer.Event.EndReached -> {
-                        // Live streams rarely end; ignore for continuous IPTV
+                // Events may arrive on VLC thread — hop to main for views
+                mainHandler.post {
+                    if (isDestroyed || mediaPlayer == null) return@post
+                    when (event.type) {
+                        MediaPlayer.Event.Buffering -> {
+                            val pct = event.buffering
+                            binding.progress.visibility =
+                                if (pct in 0f..99.5f) View.VISIBLE else View.GONE
+                            if (pct in 0f..99.5f) {
+                                scheduleBufferingWatchdog()
+                            } else {
+                                cancelBufferingWatchdog()
+                            }
+                        }
+                        MediaPlayer.Event.Playing -> {
+                            cancelBufferingWatchdog()
+                            binding.progress.visibility = View.GONE
+                            binding.errorPanel.visibility = View.GONE
+                        }
+                        MediaPlayer.Event.EncounteredError -> {
+                            cancelBufferingWatchdog()
+                            binding.progress.visibility = View.GONE
+                            binding.errorPanel.visibility = View.VISIBLE
+                            binding.tvError.text = getString(R.string.playback_error)
+                        }
+                        MediaPlayer.Event.EndReached -> {
+                            // Live streams rarely end
+                        }
                     }
                 }
             }
         }
+    }
+
+    /** If stuck buffering too long, surface an error so user can leave cleanly. */
+    private fun scheduleBufferingWatchdog() {
+        cancelBufferingWatchdog()
+        val gen = playGeneration.get()
+        val task = Runnable {
+            if (isDestroyed || gen != playGeneration.get()) return@Runnable
+            if (binding.progress.visibility == View.VISIBLE) {
+                binding.errorPanel.visibility = View.VISIBLE
+                binding.tvError.text = getString(R.string.playback_timeout)
+                binding.progress.visibility = View.GONE
+                // Stop native I/O off main so UI stays responsive
+                val mp = mediaPlayer
+                vlcExecutor.execute {
+                    try {
+                        mp?.stop()
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        }
+        bufferingWatchdog = task
+        mainHandler.postDelayed(task, BUFFERING_TIMEOUT_MS)
+    }
+
+    private fun cancelBufferingWatchdog() {
+        bufferingWatchdog?.let { mainHandler.removeCallbacks(it) }
+        bufferingWatchdog = null
     }
 
     private fun playCurrent() {
@@ -124,25 +192,51 @@ class PlayerActivity : AppCompatActivity() {
         binding.errorPanel.visibility = View.GONE
         binding.progress.visibility = View.VISIBLE
         updateChrome()
+        cancelBufferingWatchdog()
 
         val url = urls[index].trim()
-        runCatching {
-            player.stop()
-            val media = Media(vlc, Uri.parse(url))
-            // HW video OK; audio still soft-decoded by VLC for MP2/AC3 etc.
-            media.setHWDecoderEnabled(true, false)
-            media.addOption(":network-caching=1500")
-            media.addOption(":live-caching=1500")
-            media.addOption(":http-user-agent=${PlaylistRepository.USER_AGENT}")
-            media.addOption(":no-audio-time-stretch")
-            player.media = media
-            media.release()
-            player.volume = 100
-            player.play()
-        }.onFailure { e ->
-            binding.progress.visibility = View.GONE
-            binding.errorPanel.visibility = View.VISIBLE
-            binding.tvError.text = e.message ?: getString(R.string.playback_error)
+        val gen = playGeneration.incrementAndGet()
+
+        // stop + open media can block on dead/slow sources — never on main
+        vlcExecutor.execute {
+            if (gen != playGeneration.get()) return@execute
+            try {
+                try {
+                    player.stop()
+                } catch (_: Exception) {
+                }
+                if (gen != playGeneration.get()) return@execute
+
+                val media = Media(vlc, Uri.parse(url))
+                media.setHWDecoderEnabled(true, false)
+                media.addOption(":network-caching=1000")
+                media.addOption(":live-caching=1000")
+                media.addOption(":file-caching=1000")
+                media.addOption(":http-user-agent=${PlaylistRepository.USER_AGENT}")
+                media.addOption(":no-audio-time-stretch")
+                // Live: don't wait forever for perfect timestamps
+                media.addOption(":clock-jitter=0")
+                media.addOption(":clock-synchro=0")
+
+                player.media = media
+                media.release()
+                player.volume = 100
+                if (gen != playGeneration.get()) return@execute
+                player.play()
+
+                mainHandler.post {
+                    if (!isDestroyed && gen == playGeneration.get()) {
+                        scheduleBufferingWatchdog()
+                    }
+                }
+            } catch (e: Exception) {
+                mainHandler.post {
+                    if (isDestroyed || gen != playGeneration.get()) return@post
+                    binding.progress.visibility = View.GONE
+                    binding.errorPanel.visibility = View.VISIBLE
+                    binding.tvError.text = e.message ?: getString(R.string.playback_error)
+                }
+            }
         }
     }
 
@@ -229,26 +323,86 @@ class PlayerActivity : AppCompatActivity() {
         ViewCompat.requestApplyInsets(binding.root)
     }
 
+    /**
+     * Detach views on main immediately; stop/release native resources on worker thread.
+     * Safe to call multiple times.
+     */
+    private fun releasePlayerAsync() {
+        if (releaseSubmitted) return
+        releaseSubmitted = true
+        cancelBufferingWatchdog()
+
+        val mp = mediaPlayer
+        val vlc = libVlc
+        mediaPlayer = null
+        libVlc = null
+
+        // Views must be detached while Activity still has a window when possible
+        try {
+            mp?.setEventListener(null)
+        } catch (_: Exception) {
+        }
+        try {
+            mp?.detachViews()
+        } catch (_: Exception) {
+        }
+
+        vlcExecutor.execute {
+            try {
+                mp?.stop()
+            } catch (_: Exception) {
+            }
+            try {
+                mp?.release()
+            } catch (_: Exception) {
+            }
+            try {
+                vlc?.release()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     override fun onStart() {
         super.onStart()
-        mediaPlayer?.play()
+        val mp = mediaPlayer ?: return
+        if (releaseSubmitted) return
+        vlcExecutor.execute {
+            try {
+                mp.play()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     override fun onStop() {
-        mediaPlayer?.pause()
+        // pause() can also block on bad streams — never on main
+        val mp = mediaPlayer
+        if (mp != null && !releaseSubmitted && !isFinishing) {
+            vlcExecutor.execute {
+                try {
+                    mp.pause()
+                } catch (_: Exception) {
+                }
+            }
+        }
         super.onStop()
     }
 
     override fun onDestroy() {
-        mediaPlayer?.apply {
-            stop()
-            detachViews()
-            setEventListener(null)
-            release()
+        cancelBufferingWatchdog()
+        playGeneration.incrementAndGet()
+        releasePlayerAsync()
+        // Don't block Activity teardown waiting for VLC; abandon executor if stuck
+        vlcExecutor.shutdown()
+        try {
+            if (!vlcExecutor.awaitTermination(400, TimeUnit.MILLISECONDS)) {
+                vlcExecutor.shutdownNow()
+            }
+        } catch (_: InterruptedException) {
+            vlcExecutor.shutdownNow()
+            Thread.currentThread().interrupt()
         }
-        mediaPlayer = null
-        libVlc?.release()
-        libVlc = null
         super.onDestroy()
     }
 
@@ -259,5 +413,8 @@ class PlayerActivity : AppCompatActivity() {
         const val EXTRA_PLAYLIST_URLS = "playlist_urls"
         const val EXTRA_PLAYLIST_NAMES = "playlist_names"
         const val EXTRA_INDEX = "index"
+
+        /** Give up UI wait if still buffering this long (native stop still async). */
+        private const val BUFFERING_TIMEOUT_MS = 15_000L
     }
 }

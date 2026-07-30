@@ -92,10 +92,13 @@ class PlaylistRepository(private val context: Context) {
             runCatching {
                 val trimmed = url.trim()
                 val body = downloadTextWithRetry(trimmed)
-                val channels = M3uParser.parse(body)
-                if (channels.isEmpty()) error("未解析到任何频道，请确认是 M3U 播放列表")
+                val channels = PlaylistTextParser.parse(body)
+                if (channels.isEmpty()) {
+                    error("未解析到任何频道。支持 M3U/#EXTM3U，或酒店订阅「名称,地址」列表（含 <br> 分隔）")
+                }
                 upsertSubscription(
-                    name = displayName ?: trimmed.take(60),
+                    name = displayName
+                        ?: PlaylistTextParser.suggestNameFromUrl(trimmed).take(60),
                     type = SourceType.URL,
                     value = trimmed,
                     channels = channels
@@ -109,10 +112,16 @@ class PlaylistRepository(private val context: Context) {
                 val content = context.contentResolver.openInputStream(uri)?.use { input ->
                     BufferedReader(InputStreamReader(input, Charsets.UTF_8)).readText()
                 } ?: error("无法读取文件")
-                val channels = M3uParser.parse(content)
-                if (channels.isEmpty()) error("未解析到任何频道，请确认是 M3U 播放列表")
+                val channels = PlaylistTextParser.parse(content)
+                if (channels.isEmpty()) {
+                    error("未解析到任何频道。支持 M3U，或「名称,地址」列表")
+                }
                 val name = displayName
-                    ?: uri.lastPathSegment
+                    ?: uri.lastPathSegment?.let {
+                        runCatching {
+                            java.net.URLDecoder.decode(it, Charsets.UTF_8.name())
+                        }.getOrDefault(it)
+                    }
                     ?: "本地文件"
                 upsertSubscription(
                     name = name,
@@ -154,8 +163,10 @@ class PlaylistRepository(private val context: Context) {
         displayName: String = "粘贴导入"
     ): Result<Subscription> = withContext(Dispatchers.IO) {
         runCatching {
-            val channels = M3uParser.parse(content)
-            if (channels.isEmpty()) error("未解析到任何频道")
+            val channels = PlaylistTextParser.parse(content)
+            if (channels.isEmpty()) {
+                error("未解析到任何频道。支持 M3U，或「名称,地址」/<br> 列表")
+            }
             // Each paste is a new subscription (value is unique)
             upsertSubscription(
                 name = displayName,
@@ -179,7 +190,7 @@ class PlaylistRepository(private val context: Context) {
                     error("仅 URL 订阅支持刷新")
                 }
                 val body = downloadTextWithRetry(sub.value)
-                val channels = M3uParser.parse(body)
+                val channels = PlaylistTextParser.parse(body)
                 if (channels.isEmpty()) error("未解析到任何频道")
                 val updated = sub.copy(
                     channels = channels,
