@@ -1,9 +1,9 @@
 package com.example.iptvplayer
 
 import android.content.pm.ActivityInfo
+import android.net.Uri
 import android.os.Bundle
 import android.view.View
-import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -13,19 +13,21 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.updateLayoutParams
 import androidx.core.view.updatePadding
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.example.iptvplayer.data.PlaylistRepository
 import com.example.iptvplayer.databinding.ActivityPlayerBinding
+import org.videolan.libvlc.LibVLC
+import org.videolan.libvlc.Media
+import org.videolan.libvlc.MediaPlayer
 
+/**
+ * Playback via LibVLC so IPTV streams with MPEG Audio Layer 2 (MP2) have sound.
+ * Default Android MediaCodec / ExoPlayer cannot decode MP2 (shows "no audio").
+ */
 class PlayerActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityPlayerBinding
-    private var player: ExoPlayer? = null
+    private var libVlc: LibVLC? = null
+    private var mediaPlayer: MediaPlayer? = null
 
     private var names: List<String> = emptyList()
     private var urls: List<String> = emptyList()
@@ -72,39 +74,43 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun initPlayer() {
-        val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(PlaylistRepository.USER_AGENT)
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(30_000)
-
-        val mediaSourceFactory = DefaultMediaSourceFactory(this)
-            .setDataSourceFactory(httpFactory)
-
-        player = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(mediaSourceFactory)
-            .build()
-            .also { exo ->
-                binding.playerView.player = exo
-                binding.playerView.setShowBuffering(androidx.media3.ui.PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-                exo.addListener(object : Player.Listener {
-                    override fun onPlaybackStateChanged(playbackState: Int) {
+        val options = arrayListOf(
+            "--aout=opensles",
+            "--audio-time-stretch",
+            "--network-caching=1500",
+            "--live-caching=1500",
+            "--http-reconnect",
+            "--no-drop-late-frames",
+            "--no-skip-frames",
+            // Prefer software audio so MP2 always works even if HW audio path fails
+            "--no-omxil-dr"
+        )
+        libVlc = LibVLC(this, options)
+        mediaPlayer = MediaPlayer(libVlc).also { mp ->
+            mp.attachViews(binding.vlcLayout, null, false, false)
+            mp.volume = 100
+            mp.setEventListener { event ->
+                when (event.type) {
+                    MediaPlayer.Event.Buffering -> {
+                        val pct = event.buffering
                         binding.progress.visibility =
-                            if (playbackState == Player.STATE_BUFFERING) View.VISIBLE else View.GONE
-                        if (playbackState == Player.STATE_READY) {
-                            binding.errorPanel.visibility = View.GONE
-                        }
+                            if (pct in 0f..99.5f) View.VISIBLE else View.GONE
                     }
-
-                    override fun onPlayerError(error: PlaybackException) {
+                    MediaPlayer.Event.Playing -> {
+                        binding.progress.visibility = View.GONE
+                        binding.errorPanel.visibility = View.GONE
+                    }
+                    MediaPlayer.Event.EncounteredError -> {
                         binding.progress.visibility = View.GONE
                         binding.errorPanel.visibility = View.VISIBLE
-                        binding.tvError.text = error.message
-                            ?: getString(R.string.playback_error)
+                        binding.tvError.text = getString(R.string.playback_error)
                     }
-                })
-                exo.playWhenReady = true
+                    MediaPlayer.Event.EndReached -> {
+                        // Live streams rarely end; ignore for continuous IPTV
+                    }
+                }
             }
+        }
     }
 
     private fun playCurrent() {
@@ -112,13 +118,32 @@ class PlayerActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.invalid_url, Toast.LENGTH_SHORT).show()
             return
         }
+        val vlc = libVlc ?: return
+        val player = mediaPlayer ?: return
+
         binding.errorPanel.visibility = View.GONE
+        binding.progress.visibility = View.VISIBLE
         updateChrome()
-        val url = urls[index]
-        // DefaultMediaSourceFactory auto-detects HLS / progressive / DASH
-        player?.setMediaItem(MediaItem.fromUri(url))
-        player?.prepare()
-        player?.play()
+
+        val url = urls[index].trim()
+        runCatching {
+            player.stop()
+            val media = Media(vlc, Uri.parse(url))
+            // HW video OK; audio still soft-decoded by VLC for MP2/AC3 etc.
+            media.setHWDecoderEnabled(true, false)
+            media.addOption(":network-caching=1500")
+            media.addOption(":live-caching=1500")
+            media.addOption(":http-user-agent=${PlaylistRepository.USER_AGENT}")
+            media.addOption(":no-audio-time-stretch")
+            player.media = media
+            media.release()
+            player.volume = 100
+            player.play()
+        }.onFailure { e ->
+            binding.progress.visibility = View.GONE
+            binding.errorPanel.visibility = View.VISIBLE
+            binding.tvError.text = e.message ?: getString(R.string.playback_error)
+        }
     }
 
     private fun switchChannel(delta: Int) {
@@ -162,7 +187,6 @@ class PlayerActivity : AppCompatActivity() {
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             if (!isFullscreen) {
-                // Title row sits fully below the status bar clock area
                 binding.toolbar.updatePadding(top = bars.top)
                 binding.toolbar.updateLayoutParams {
                     height = actionBarSize + bars.top
@@ -207,18 +231,24 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        player?.play()
+        mediaPlayer?.play()
     }
 
     override fun onStop() {
-        player?.pause()
+        mediaPlayer?.pause()
         super.onStop()
     }
 
     override fun onDestroy() {
-        player?.release()
-        player = null
-        binding.playerView.player = null
+        mediaPlayer?.apply {
+            stop()
+            detachViews()
+            setEventListener(null)
+            release()
+        }
+        mediaPlayer = null
+        libVlc?.release()
+        libVlc = null
         super.onDestroy()
     }
 

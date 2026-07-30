@@ -8,17 +8,16 @@
     android:background="@android:color/black"
     tools:context=".PlayerActivity">
 
-    <androidx.media3.ui.PlayerView
-        android:id="@+id/playerView"
+    <!-- LibVLC surface: supports MP2 / AC3 and other IPTV codecs VLC can decode -->
+    <org.videolan.libvlc.util.VLCVideoLayout
+        android:id="@+id/vlcLayout"
         android:layout_width="0dp"
         android:layout_height="0dp"
+        android:fitsSystemWindows="false"
         app:layout_constraintBottom_toTopOf="@id/bottomBar"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
-        app:resize_mode="fit"
-        app:show_buffering="when_playing"
-        app:use_controller="true" />
+        app:layout_constraintTop_toTopOf="parent" />
 
     <com.google.android.material.appbar.MaterialToolbar
         android:id="@+id/toolbar"
@@ -40,10 +39,10 @@
         android:indeterminate="true"
         android:visibility="gone"
         app:indicatorColor="?attr/colorPrimary"
-        app:layout_constraintBottom_toBottomOf="@id/playerView"
+        app:layout_constraintBottom_toBottomOf="@id/vlcLayout"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="@id/playerView" />
+        app:layout_constraintTop_toTopOf="@id/vlcLayout" />
 
     <LinearLayout
         android:id="@+id/errorPanel"
@@ -53,10 +52,10 @@
         android:orientation="vertical"
         android:padding="24dp"
         android:visibility="gone"
-        app:layout_constraintBottom_toBottomOf="@id/playerView"
+        app:layout_constraintBottom_toBottomOf="@id/vlcLayout"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="@id/playerView">
+        app:layout_constraintTop_toTopOf="@id/vlcLayout">
 
         <TextView
             android:id="@+id/tvError"
@@ -76,7 +75,6 @@
             android:text="@string/retry" />
     </LinearLayout>
 
-    <!-- MD3 bottom app bar style controls -->
     <com.google.android.material.card.MaterialCardView
         android:id="@+id/bottomBar"
         android:layout_width="0dp"

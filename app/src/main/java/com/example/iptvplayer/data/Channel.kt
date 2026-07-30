@@ -8,15 +8,23 @@ data class Channel(
     val tvgId: String? = null
 )
 
-data class PlaylistSource(
+/**
+ * One imported playlist / subscription. Channels belong only to this subscription.
+ */
+data class Subscription(
+    val id: String,
     val name: String,
     val type: SourceType,
-    val value: String, // URL or absolute path or raw content marker
-    val importedAt: Long = System.currentTimeMillis()
-)
+    val value: String, // URL, content uri, stream url, or "paste"
+    val importedAt: Long = System.currentTimeMillis(),
+    val channels: List<Channel> = emptyList()
+) {
+    val channelCount: Int get() = channels.size
+}
 
 enum class SourceType {
     URL,
     FILE,
-    SINGLE_STREAM
+    SINGLE_STREAM,
+    PASTE
 }
