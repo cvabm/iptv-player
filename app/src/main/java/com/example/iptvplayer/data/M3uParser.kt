@@ -8,40 +8,34 @@ object M3uParser {
     private val attrRegex = Regex("""([\w-]+)="([^"]*)"""")
 
     fun parse(content: String): List<Channel> {
-        val channels = mutableListOf<Channel>()
-        val lines = content.lines()
-        var i = 0
-        while (i < lines.size) {
-            val line = lines[i].trim()
+        // Single-pass over lines; avoid content.lines() which materializes the full list.
+        val channels = ArrayList<Channel>(4096)
+        var pending: ExtInf? = null
+        for (raw in content.lineSequence()) {
+            val line = raw.trim()
+            if (line.isEmpty()) continue
             if (line.startsWith("#EXTINF", ignoreCase = true)) {
-                val meta = parseExtInf(line)
-                // next non-empty, non-comment line is the stream URL
-                var j = i + 1
-                while (j < lines.size) {
-                    val next = lines[j].trim()
-                    if (next.isEmpty() || next.startsWith("#")) {
-                        j++
-                        continue
-                    }
-                    channels += Channel(
-                        name = meta.name.ifBlank { "频道 ${channels.size + 1}" },
-                        url = next,
-                        group = meta.group.ifBlank { "未分组" },
-                        logo = meta.logo,
-                        tvgId = meta.tvgId
-                    )
-                    i = j
-                    break
-                }
-            } else if (line.isNotEmpty() && !line.startsWith("#") && looksLikeUrl(line)) {
-                // plain URL list without EXTINF
+                pending = parseExtInf(line)
+                continue
+            }
+            if (line.startsWith("#")) continue
+            if (pending != null) {
+                val meta = pending
+                pending = null
+                channels += Channel(
+                    name = meta.name.ifBlank { "频道 ${channels.size + 1}" },
+                    url = line,
+                    group = meta.group.ifBlank { "未分组" },
+                    logo = meta.logo,
+                    tvgId = meta.tvgId
+                )
+            } else if (looksLikeUrl(line)) {
                 channels += Channel(
                     name = "频道 ${channels.size + 1}",
                     url = line,
                     group = "未分组"
                 )
             }
-            i++
         }
         return channels
     }

@@ -15,6 +15,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.updateLayoutParams
 import androidx.core.view.updatePadding
+import com.example.iptvplayer.data.PlaybackSession
 import com.example.iptvplayer.data.PlaylistRepository
 import com.example.iptvplayer.databinding.ActivityPlayerBinding
 import org.videolan.libvlc.LibVLC
@@ -57,13 +58,29 @@ class PlayerActivity : AppCompatActivity() {
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        names = intent.getStringArrayListExtra(EXTRA_PLAYLIST_NAMES) ?: arrayListOf(
-            intent.getStringExtra(EXTRA_NAME) ?: "直播"
-        )
-        urls = intent.getStringArrayListExtra(EXTRA_PLAYLIST_URLS) ?: arrayListOf(
-            intent.getStringExtra(EXTRA_URL) ?: ""
-        )
-        index = intent.getIntExtra(EXTRA_INDEX, 0).coerceIn(0, (urls.size - 1).coerceAtLeast(0))
+        if (intent.getBooleanExtra(EXTRA_USE_SESSION, false) && PlaybackSession.channels.isNotEmpty()) {
+            // Prefer in-process queue (large lists must not go through Intent).
+            // Avoid mapping 10k+ Channel → two String lists on the main thread.
+            val queue = PlaybackSession.channels
+            names = object : AbstractList<String>() {
+                override val size: Int get() = queue.size
+                override fun get(index: Int): String = queue[index].name
+            }
+            urls = object : AbstractList<String>() {
+                override val size: Int get() = queue.size
+                override fun get(index: Int): String = queue[index].url
+            }
+            index = intent.getIntExtra(EXTRA_INDEX, PlaybackSession.index)
+                .coerceIn(0, (urls.size - 1).coerceAtLeast(0))
+        } else {
+            names = intent.getStringArrayListExtra(EXTRA_PLAYLIST_NAMES) ?: arrayListOf(
+                intent.getStringExtra(EXTRA_NAME) ?: "直播"
+            )
+            urls = intent.getStringArrayListExtra(EXTRA_PLAYLIST_URLS) ?: arrayListOf(
+                intent.getStringExtra(EXTRA_URL) ?: ""
+            )
+            index = intent.getIntExtra(EXTRA_INDEX, 0).coerceIn(0, (urls.size - 1).coerceAtLeast(0))
+        }
 
         onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -413,6 +430,8 @@ class PlayerActivity : AppCompatActivity() {
         const val EXTRA_PLAYLIST_URLS = "playlist_urls"
         const val EXTRA_PLAYLIST_NAMES = "playlist_names"
         const val EXTRA_INDEX = "index"
+        /** When true, read play queue from [PlaybackSession] instead of Intent extras. */
+        const val EXTRA_USE_SESSION = "use_session"
 
         /** Give up UI wait if still buffering this long (native stop still async). */
         private const val BUFFERING_TIMEOUT_MS = 15_000L

@@ -20,6 +20,7 @@ import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.example.iptvplayer.data.Channel
+import com.example.iptvplayer.data.PlaybackSession
 import com.example.iptvplayer.data.PlaylistRepository
 import com.example.iptvplayer.data.SourceType
 import com.example.iptvplayer.data.Subscription
@@ -30,7 +31,11 @@ import com.example.iptvplayer.ui.GroupAdapter
 import com.example.iptvplayer.ui.GroupItem
 import com.example.iptvplayer.ui.SubscriptionAdapter
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
 
@@ -41,9 +46,16 @@ class MainActivity : AppCompatActivity() {
     private var subscriptions: List<Subscription> = emptyList()
     private var activeSubscription: Subscription? = null
     private var allChannels: List<Channel> = emptyList()
+    /** Pre-bucketed by group for O(1) group switches. */
+    private var channelsByGroup: Map<String, List<Channel>> = emptyMap()
     private var groupItems: List<GroupItem> = emptyList()
     private var currentGroup: String = GROUP_ALL
     private var query: String = ""
+
+    private var filterJob: Job? = null
+    private var reloadJob: Job? = null
+    /** Bumps on each filter request so stale results are dropped. */
+    private var filterGeneration = 0
 
     private val pickM3u = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -72,6 +84,8 @@ class MainActivity : AppCompatActivity() {
         adapter = ChannelAdapter { openPlayer(it) }
 
         binding.recycler.layoutManager = LinearLayoutManager(this)
+        binding.recycler.setHasFixedSize(true)
+        binding.recycler.setItemViewCacheSize(20)
         binding.recycler.adapter = adapter
 
         binding.fabImport.setOnClickListener { showImportDialog() }
@@ -81,7 +95,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.search.doAfterTextChanged {
             query = it?.toString().orEmpty()
-            applyFilter()
+            scheduleFilter(debounceMs = if (query.isEmpty()) 0L else SEARCH_DEBOUNCE_MS)
         }
 
         binding.swipeRefresh.setOnRefreshListener {
@@ -137,14 +151,72 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun reload() {
-        subscriptions = repo.loadSubscriptions()
-        activeSubscription = repo.getActiveSubscription()
-        allChannels = activeSubscription?.channels.orEmpty()
-        rebuildGroups()
-        applyFilter()
-        updateSubscriptionChrome()
-        updateEmptyState()
+    /**
+     * Load subscription meta + active channels off the main thread.
+     * Switching sources and cold start used to parse the entire multi-subscription
+     * JSON on the UI thread — catastrophic at tens of thousands of channels.
+     */
+    private fun reload(showProgress: Boolean = allChannels.isEmpty()) {
+        reloadJob?.cancel()
+        reloadJob = lifecycleScope.launch {
+            if (showProgress) setLoading(true)
+            val snapshot = withContext(Dispatchers.IO) {
+                val subs = repo.loadSubscriptions()
+                val activeMeta = repo.getActiveSubscription()
+                val channels = if (activeMeta != null) {
+                    repo.loadChannels(activeMeta.id)
+                } else {
+                    emptyList()
+                }
+                val groups = buildGroupIndex(channels)
+                ReloadSnapshot(
+                    subscriptions = subs,
+                    active = activeMeta,
+                    channels = channels,
+                    byGroup = groups.first,
+                    groupItems = groups.second
+                )
+            }
+            subscriptions = snapshot.subscriptions
+            activeSubscription = snapshot.active
+            allChannels = snapshot.channels
+            channelsByGroup = snapshot.byGroup
+            groupItems = snapshot.groupItems
+            if (currentGroup != GROUP_ALL && currentGroup !in channelsByGroup) {
+                currentGroup = GROUP_ALL
+            }
+            updateSubscriptionChrome()
+            updateGroupChrome()
+            updateEmptyState()
+            if (showProgress) setLoading(false)
+            applyFilterImmediate()
+        }
+    }
+
+    private data class ReloadSnapshot(
+        val subscriptions: List<Subscription>,
+        val active: Subscription?,
+        val channels: List<Channel>,
+        val byGroup: Map<String, List<Channel>>,
+        val groupItems: List<GroupItem>
+    )
+
+    private fun buildGroupIndex(
+        channels: List<Channel>
+    ): Pair<Map<String, List<Channel>>, List<GroupItem>> {
+        if (channels.isEmpty()) {
+            return emptyMap<String, List<Channel>>() to listOf(GroupItem(GROUP_ALL, 0))
+        }
+        val map = LinkedHashMap<String, MutableList<Channel>>()
+        for (c in channels) {
+            map.getOrPut(c.group) { ArrayList() }.add(c)
+        }
+        val byGroup: Map<String, List<Channel>> = map
+        val sorted = byGroup.entries
+            .sortedBy { it.key }
+            .map { GroupItem(it.key, it.value.size) }
+        val items = listOf(GroupItem(GROUP_ALL, channels.size)) + sorted
+        return byGroup to items
     }
 
     private fun updateSubscriptionChrome() {
@@ -156,23 +228,6 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun rebuildGroups() {
-        val counts = linkedMapOf<String, Int>()
-        allChannels.forEach { c ->
-            counts[c.group] = (counts[c.group] ?: 0) + 1
-        }
-        val sorted = counts.entries
-            .sortedBy { it.key }
-            .map { GroupItem(it.key, it.value) }
-
-        groupItems = listOf(GroupItem(GROUP_ALL, allChannels.size)) + sorted
-
-        if (currentGroup != GROUP_ALL && currentGroup !in counts) {
-            currentGroup = GROUP_ALL
-        }
-        updateGroupChrome()
-    }
-
     private fun updateGroupChrome() {
         binding.tvCurrentGroup.text = currentGroup
         val classCount = (groupItems.size - 1).coerceAtLeast(0)
@@ -180,6 +235,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSubscriptionPicker() {
+        // Metadata only — never loads channel bodies for every subscription.
         val list = repo.loadSubscriptions()
         if (list.isEmpty()) {
             Toast.makeText(this, R.string.no_sources, Toast.LENGTH_SHORT).show()
@@ -208,7 +264,7 @@ class MainActivity : AppCompatActivity() {
                         currentGroup = GROUP_ALL
                         query = ""
                         binding.search.setText("")
-                        reload()
+                        reload(showProgress = true)
                         Toast.makeText(this, R.string.subscription_switched, Toast.LENGTH_SHORT).show()
                     }
                     dialog.dismiss()
@@ -220,7 +276,7 @@ class MainActivity : AppCompatActivity() {
                         .setPositiveButton(R.string.delete_subscription) { _, _ ->
                             repo.deleteSubscription(sub.id)
                             currentGroup = GROUP_ALL
-                            reload()
+                            reload(showProgress = true)
                             Toast.makeText(this, R.string.subscription_deleted, Toast.LENGTH_SHORT).show()
                             bindList()
                         }
@@ -256,7 +312,7 @@ class MainActivity : AppCompatActivity() {
         val groupAdapter = GroupAdapter(currentGroup) { item ->
             currentGroup = item.name
             updateGroupChrome()
-            applyFilter()
+            applyFilterImmediate()
             dialog.dismiss()
         }
         rv.layoutManager = LinearLayoutManager(this)
@@ -276,18 +332,47 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    private fun applyFilter() {
-        val q = query.trim().lowercase()
-        val filtered = allChannels.filter { c ->
-            val groupOk = currentGroup == GROUP_ALL || c.group == currentGroup
-            val queryOk = q.isEmpty() ||
-                c.name.lowercase().contains(q) ||
-                c.group.lowercase().contains(q) ||
-                c.url.lowercase().contains(q)
-            groupOk && queryOk
+    private fun scheduleFilter(debounceMs: Long) {
+        filterJob?.cancel()
+        filterJob = lifecycleScope.launch {
+            if (debounceMs > 0) delay(debounceMs)
+            applyFilterImmediate()
         }
-        adapter.submitList(filtered)
-        binding.tvCount.text = getString(R.string.channel_count, filtered.size, allChannels.size)
+    }
+
+    private fun applyFilterImmediate() {
+        val gen = ++filterGeneration
+        val q = query.trim()
+        val group = currentGroup
+        val base: List<Channel> = if (group == GROUP_ALL) {
+            allChannels
+        } else {
+            channelsByGroup[group].orEmpty()
+        }
+        val total = allChannels.size
+
+        if (q.isEmpty()) {
+            // Fast path: no search — reuse pre-bucketed list, no copy needed
+            if (gen != filterGeneration) return
+            adapter.submitList(base)
+            binding.tvCount.text = getString(R.string.channel_count, base.size, total)
+            return
+        }
+
+        filterJob = lifecycleScope.launch {
+            val filtered = withContext(Dispatchers.Default) {
+                val needle = q.lowercase()
+                val matchUrl = needle.startsWith("http") || needle.contains("://")
+                base.filter { c ->
+                    c.name.lowercase().contains(needle) ||
+                        c.group.lowercase().contains(needle) ||
+                        (matchUrl && c.url.lowercase().contains(needle))
+                }
+            }
+            if (gen != filterGeneration) return@launch
+            adapter.submitList(filtered)
+            binding.tvCount.text = getString(R.string.channel_count, filtered.size, total)
+        }
     }
 
     private fun updateEmptyState() {
@@ -356,7 +441,7 @@ class MainActivity : AppCompatActivity() {
                     getString(R.string.import_success, sub.channelCount),
                     Toast.LENGTH_SHORT
                 ).show()
-                reload()
+                reload(showProgress = false)
             }.onFailure { e ->
                 showError(e.message ?: "导入失败")
             }
@@ -375,7 +460,7 @@ class MainActivity : AppCompatActivity() {
                     getString(R.string.import_success, sub.channelCount),
                     Toast.LENGTH_SHORT
                 ).show()
-                reload()
+                reload(showProgress = false)
             }.onFailure { e ->
                 showError(e.message ?: "导入失败")
             }
@@ -390,7 +475,7 @@ class MainActivity : AppCompatActivity() {
             result.onSuccess {
                 currentGroup = GROUP_ALL
                 Toast.makeText(this@MainActivity, R.string.stream_added, Toast.LENGTH_SHORT).show()
-                reload()
+                reload(showProgress = false)
             }.onFailure { e ->
                 showError(e.message ?: "添加失败")
             }
@@ -409,7 +494,7 @@ class MainActivity : AppCompatActivity() {
                     getString(R.string.import_success, sub.channelCount),
                     Toast.LENGTH_SHORT
                 ).show()
-                reload()
+                reload(showProgress = false)
             }.onFailure { e ->
                 showError(e.message ?: "导入失败")
             }
@@ -426,7 +511,7 @@ class MainActivity : AppCompatActivity() {
         if (sub.type != SourceType.URL) {
             if (fromSwipe) {
                 binding.swipeRefresh.isRefreshing = false
-                reload()
+                reload(showProgress = false)
                 Toast.makeText(this, R.string.refresh_not_url, Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(this, R.string.refresh_not_url, Toast.LENGTH_SHORT).show()
@@ -448,7 +533,7 @@ class MainActivity : AppCompatActivity() {
                     getString(R.string.refresh_success, updated.channelCount),
                     Toast.LENGTH_SHORT
                 ).show()
-                reload()
+                reload(showProgress = false)
             }.onFailure { e ->
                 showError(e.message ?: "刷新失败")
             }
@@ -464,7 +549,7 @@ class MainActivity : AppCompatActivity() {
                 currentGroup = GROUP_ALL
                 query = ""
                 binding.search.setText("")
-                reload()
+                reload(showProgress = true)
                 Toast.makeText(this, R.string.cleared, Toast.LENGTH_SHORT).show()
             }
             .setNeutralButton(R.string.clear_all) { _, _ ->
@@ -472,7 +557,7 @@ class MainActivity : AppCompatActivity() {
                 currentGroup = GROUP_ALL
                 query = ""
                 binding.search.setText("")
-                reload()
+                reload(showProgress = true)
                 Toast.makeText(this, R.string.cleared, Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton(R.string.cancel, null)
@@ -480,16 +565,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openPlayer(channel: Channel) {
+        val filtered = adapter.currentList
+        val idx = filtered.indexOfFirst { it.url == channel.url }.coerceAtLeast(0)
+        // Hold queue in-process — never pack 10k+ strings into Intent extras
+        PlaybackSession.set(filtered, idx)
         val intent = Intent(this, PlayerActivity::class.java).apply {
             putExtra(PlayerActivity.EXTRA_NAME, channel.name)
             putExtra(PlayerActivity.EXTRA_URL, channel.url)
             putExtra(PlayerActivity.EXTRA_GROUP, channel.group)
-            val filtered = adapter.currentList
-            val urls = ArrayList(filtered.map { it.url })
-            val names = ArrayList(filtered.map { it.name })
-            putStringArrayListExtra(PlayerActivity.EXTRA_PLAYLIST_URLS, urls)
-            putStringArrayListExtra(PlayerActivity.EXTRA_PLAYLIST_NAMES, names)
-            putExtra(PlayerActivity.EXTRA_INDEX, filtered.indexOfFirst { it.url == channel.url })
+            putExtra(PlayerActivity.EXTRA_INDEX, idx)
+            putExtra(PlayerActivity.EXTRA_USE_SESSION, true)
         }
         startActivity(intent)
     }
@@ -509,5 +594,6 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val GROUP_ALL = "全部"
+        private const val SEARCH_DEBOUNCE_MS = 200L
     }
 }
