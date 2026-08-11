@@ -27,6 +27,14 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+          yes | sdkmanager --licenses >/dev/null || true
+
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
@@ -59,7 +67,7 @@ jobs:
           elif [ "${{ github.ref_type }}" = "tag" ]; then
             TAG="${{ github.ref_name }}"
           else
-            TAG="manual-${{ github.sha }}"
+            TAG="manual-${GITHUB_SHA::7}"
           fi
           echo "name=$TAG" >> "$GITHUB_OUTPUT"
           echo "Release tag: $TAG"
