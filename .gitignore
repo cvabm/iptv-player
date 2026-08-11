@@ -48,9 +48,10 @@ captures/
 .idea/modules.xml
 .idea/navEditor.xml
 
-# Keystore files
+# Keystore files (project ships a public release keystore under keystore/)
 *.jks
 *.keystore
+!keystore/iptv-release.jks
 
 # External native build folder generated in Android Studio 2.2 and later
 .externalNativeBuild
